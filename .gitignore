@@ -1,0 +1,42 @@
+# Папка с виртуальным окружением
+.venv/
+venv/
+env/
+
+# Кэш и скомпилированные файлы Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Папки, создаваемые при сборке пакетов
+build/
+dist/
+*.egg-info/
+
+# Файлы моделей
+*.gguf
+*.bin
+*.safetensors
+
+# Лог-файлы
+*.log
+*.log.*
+
+# Файлы баз данных
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
+
+# Секреты и конфигурация окружения
+.env
+*.env
+config.ini
+
+# Файлы IDE и редакторов кода
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.flake8
