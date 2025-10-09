@@ -116,6 +116,30 @@ open http://localhost:8000
 3. Lower PRIORITY runs first (e.g., 50 for specialized, 1000 for fallback)
 4. Plugin auto-loads on daemon restart (no registration needed)
 
+### Plugin Development
+
+Plugins are loaded from the `plugins/` directory and sorted by `PRIORITY`. Lower `PRIORITY` values are loaded first. Each plugin must implement the `can_handle()` and `parse()` functions. The `can_handle()` function determines whether the plugin can handle a given log line, and the `parse()` function parses the log line and returns a dictionary with the following keys: `original_line`, `severity`, `count`, `message`, and `host`.
+
+To test a new plugin, you can add it to the `plugins/` directory and restart the agent. The agent will automatically load the plugin and use it to parse log lines.
+
+Example:
+```python
+# plugins/my_plugin.py
+PRIORITY = 500
+
+def can_handle(line: str) -> bool:
+    return 'my_plugin' in line
+
+def parse(line: str) -> dict:
+    return {
+        'original_line': line,
+        'severity': 3,
+        'count': 1,
+        'message': 'My plugin detected an event',
+        'host': 'my_host'
+    }
+```
+
 ### Testing LLM Providers
 
 ```python
@@ -132,33 +156,24 @@ print(orchestrator.get_summary("connection refused"))  # Uses rule-based fallbac
 
 ## Configuration
 
-### Environment Variables (Priority: CLI args > env vars > defaults)
+The agent is configured using environment variables. The following table lists the available environment variables and their descriptions.
 
-```bash
-# Database & Logging
-DB_PATH=analytics.db
-DEBUG_LOG_PATH=debug.log
-MAX_SEVERITY_TO_PROCESS=5
-
-# Local Model
-MODEL_PATH=models/phi-3-mini.gguf
-N_CTX=4096
-N_THREADS=-1  # Auto-detect
-N_GPU_LAYERS=0
-
-# Google API
-ENABLE_GOOGLE=true
-GOOGLE_API_KEY=your-key
-GOOGLE_MODEL=gemini-1.5-flash
-
-# Database Cleanup
-CLEAN_INTERVAL=604800  # 7 days in seconds
-CLEAN_ON_START=false  # Set true to wipe DB on startup
-
-# Web Monitor
-TZ=Europe/Moscow  # Timezone for display
-REFRESH_SEC=5
-```
+| Environment Variable | Description |
+|---|---| 
+| `DB_PATH` | The path to the SQLite database. |
+| `DEBUG_LOG_PATH` | The path to the debug log file. |
+| `MAX_SEVERITY_TO_PROCESS` | The maximum severity level to process. |
+| `MODEL_PATH` | The path to the local LLM model. |
+| `N_CTX` | The size of the context for the local LLM model. |
+| `N_THREADS` | The number of threads to use for the local LLM model. |
+| `N_GPU_LAYERS` | The number of GPU layers to use for the local LLM model. |
+| `ENABLE_GOOGLE` | Whether to enable the Google API. |
+| `GOOGLE_API_KEY` | The Google API key. |
+| `GOOGLE_MODEL` | The Google model to use. |
+| `CLEAN_INTERVAL` | The interval at which to clean the database. |
+| `CLEAN_ON_START` | Whether to clean the database on start. |
+| `TZ` | The timezone to use for the web monitor. |
+| `REFRESH_SEC` | The refresh interval for the web monitor. |
 
 ### Key Files
 
@@ -193,3 +208,9 @@ See `MIGRATION_GUIDE.md` for details on the refactor from monolithic `agent_daem
 - LLM logic moved from 800-line daemon to separate providers
 - Orchestrator handles fallback (no manual try/catch chains)
 - Plugins unchanged (backward compatible)
+
+### LLM Orchestrator
+
+The LLM orchestrator manages the fallback between different LLM providers. It tries each provider in order until one returns a summary. If all providers fail, it uses a rule-based fallback mechanism. The rule-based fallback mechanism uses keywords to identify the type of log message and generate a summary. For example, if the log message contains the word "error", the rule-based fallback mechanism will generate a summary that indicates an error.
+
+The `llm_orchestrator.py` file contains the implementation of the LLM orchestrator. The `LLMOrchestrator` class manages the list of providers and the rule-based fallback mechanism. The `get_summary()` method tries each provider in order until one returns a summary. If all providers fail, it calls the `_rule_based_fallback()` method to generate a summary.
