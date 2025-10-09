@@ -105,6 +105,7 @@ def severity_css_class(sev: int) -> str:
 def fetch_rows(db_path: str):
     if not os.path.exists(db_path):
         return []
+    conn = None
     try:
         # Устанавливаем целевой часовой пояс. UTC по умолчанию, если указан неверный.
         try:
@@ -146,9 +147,8 @@ def fetch_rows(db_path: str):
         return res
     except sqlite3.OperationalError as e:
         app.logger.warning(f"Не удалось прочитать БД (возможно, заблокирована): {e}")
-        return []
     finally:
-        if 'conn' in locals() and conn:
+        if conn:
             conn.close()
 
 
