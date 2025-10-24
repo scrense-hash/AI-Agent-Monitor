@@ -17,6 +17,8 @@ from flask import Flask, render_template_string
 # --- ИМПОРТ ВСТРОЕННОГО МОДУЛЯ ДЛЯ РАБОТЫ С ЧАСОВЫМИ ПОЯСАМИ ---
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import agent_daemon
+
 
 # --- КОНФИГУРАЦИЯ ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -173,9 +175,11 @@ def health():
 
 if __name__ == "__main__":
     # Для Python < 3.9 установите backports.zoneinfo: pip install backports.zoneinfo
-    # Для Windows может понадобиться: pip install tzdata
-    bind = os.getenv("BIND", "0.0.0.0")
-    port = int(os.getenv("PORT", "8000"))
+
+    # Если переменная окружения WEB_PORT не задана, используем порт по умолчанию
+    bind = os.getenv("BIND_INTERFACE", agent_daemon.DEFAULT_BIND_INTERFACE)
+    # Если переменная окружения WEB_PORT не задана, используем порт по умолчанию
+    port = int(os.getenv("WEB_PORT", str(agent_daemon.DEFAULT_WEB_PORT)))
     try:
         from waitress import serve
         serve(app, host=bind, port=port)

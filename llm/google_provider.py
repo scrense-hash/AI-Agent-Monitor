@@ -16,6 +16,7 @@ from .base_provider import BaseLLMProvider
 # Опциональная зависимость
 try:
     import google.generativeai as genai
+    from google.generativeai.types import HarmCategory, HarmBlockThreshold
     GOOGLE_API_AVAILABLE = True
 except ImportError:
     GOOGLE_API_AVAILABLE = False
@@ -28,7 +29,7 @@ SYSTEM_INSTRUCTION = """
 Твоя задача — понять суть сообщения из лога и вернуть ТОЛЬКО валидный JSON-объект с кратким описанием проблемы НА РУССКОМ ЯЗЫКЕ.
 
 Формат ответа (строго JSON):
-{"summary": "Краткое описание на русском (максимум 30 слов)"}
+{"summary": "Полное описание на русском (максимум 30 слов)"}
 
 ВАЖНО:
 - Только JSON, никакого дополнительного текста
@@ -83,9 +84,19 @@ class GoogleProvider(BaseLLMProvider):
 
         try:
             genai.configure(api_key=key)
+
+            # Настройки безопасности
+            safety_settings = {
+                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+            }
+
             self.model = genai.GenerativeModel(
                 model_name=model_name,
-                system_instruction=SYSTEM_INSTRUCTION
+                system_instruction=SYSTEM_INSTRUCTION,
+                safety_settings=safety_settings  # <--- ДОБАВЛЯЕМ ПАРАМЕТР
             )
             self._is_ready = True
             logging.info(f"[GoogleProvider] Инициализирован с моделью {model_name}")

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-agent_daemon.py (REFACTORED VERSION)
+agent_daemon.py (REFACTOURED VERSION)
 Агент слушает UDP (rsyslog), извлекает "summary" через LLM-оркестратор и сохраняет инциденты в SQLite.
 Парсинг логов через систему плагинов (plugins/).
 LLM-логика вынесена в модуль llm/.
@@ -35,9 +35,11 @@ from logging.handlers import RotatingFileHandler
 from typing import Optional, Dict, List, Any
 
 # Импорт LLM модулей
+import dotenv  # NOTE: There might be a Pylance issue with resolving the dotenv import even after installing the package.
 from llm.local_provider import LocalProvider
 from llm.google_provider import GoogleProvider
 from llm.orchestrator import LLMOrchestrator
+
 
 # -------- Константы --------
 
@@ -46,12 +48,20 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DB_PATH = os.path.join(SCRIPT_DIR, "analytics.db")
 DEFAULT_DEBUG_LOG_PATH = os.path.join(SCRIPT_DIR, "debug.log")
 
-DEFAULT_HOST = "0.0.0.0"
-DEFAULT_PORT = 1514
-DEFAULT_RECV_BUF = 8192
+# Привязка интерфейса общая для rsyslog и веб-сервера
+DEFAULT_BIND_INTERFACE = "0.0.0.0"
 
+# Порт и буфер для rsyslog
+DEFAULT_RSYSLOG_PORT = 1514
+DEFAULT_RSYSLOG_RECV_BUF = 8192
+
+# Порт для встроенного веб-сервера мониторинга
+DEFAULT_WEB_PORT = 8000
+
+# Уровень серьезности (severity) для обработки (0..7, где 0 - Emergency, 7 - Debug)  
 DEFAULT_MAX_SEVERITY_TO_PROCESS = 5
 
+# Очистка БД
 DEFAULT_CLEAN_ON_START = True
 DEFAULT_CLEAN_INTERVAL = 60 * 60 * 24 * 7  # 7 дней
 
@@ -59,12 +69,13 @@ DEFAULT_CLEAN_INTERVAL = 60 * 60 * 24 * 7  # 7 дней
 DEFAULT_MODEL_PATH = os.path.join(SCRIPT_DIR, "models", "phi-3-mini-4k-instruct-q4_k_m.gguf")
 DEFAULT_N_CTX = 4096
 DEFAULT_N_THREADS = -1
-DEFAULT_N_GPU_LAYERS = 0
+DEFAULT_N_GPU_LAYERS = -1
 DEFAULT_MAX_TOKENS = 256
 DEFAULT_TEMPERATURE = 0.0
 
 # Google API
-DEFAULT_GOOGLE_MODEL = "gemini-1.5-flash"
+# Список моделей: curl "https://generativelanguage.googleapis.com/v1beta/models?key=${API_KEY}"
+DEFAULT_GOOGLE_MODEL = "gemini-2.5-flash"
 
 
 # -------- Конфигурация --------
@@ -73,9 +84,9 @@ DEFAULT_GOOGLE_MODEL = "gemini-1.5-flash"
 class Config:
     db_path: str = DEFAULT_DB_PATH
     debug_log_path: str = DEFAULT_DEBUG_LOG_PATH
-    host: str = DEFAULT_HOST
-    port: int = DEFAULT_PORT
-    recv_buf: int = DEFAULT_RECV_BUF
+    host: str = DEFAULT_BIND_INTERFACE
+    port: int = DEFAULT_RSYSLOG_PORT
+    recv_buf: int = DEFAULT_RSYSLOG_RECV_BUF
     max_severity: int = DEFAULT_MAX_SEVERITY_TO_PROCESS
 
     # Локальная модель
@@ -97,12 +108,14 @@ class Config:
 
     @staticmethod
     def from_env_and_args() -> "Config":
+        dotenv.load_dotenv()
         p = argparse.ArgumentParser(description="Rsyslog AI-Agent (Refactored with LLM modules)")
         p.add_argument("--db", default=os.getenv("DB_PATH", DEFAULT_DB_PATH))
         p.add_argument("--debug-log", default=os.getenv("DEBUG_LOG_PATH", DEFAULT_DEBUG_LOG_PATH))
-        p.add_argument("--host", default=os.getenv("HOST", DEFAULT_HOST))
-        p.add_argument("--port", type=int, default=int(os.getenv("PORT", DEFAULT_PORT)))
-        p.add_argument("--recv-buf", type=int, default=int(os.getenv("RECV_BUF", DEFAULT_RECV_BUF)))
+        p.add_argument("--bind-interface", default=os.getenv("BIND_INTERFACE", DEFAULT_BIND_INTERFACE))
+        p.add_argument("--rsyslog-port", type=int, default=int(os.getenv("RSYSLOG_PORT", DEFAULT_RSYSLOG_PORT)))
+        p.add_argument("--web-port", type=int, default=int(os.getenv("WEB_PORT", DEFAULT_WEB_PORT)))
+        p.add_argument("--rsyslog-recv-buf", type=int, default=int(os.getenv("RSYSLOG_RECV_BUF", DEFAULT_RSYSLOG_RECV_BUF)))
         p.add_argument("--max-sev", type=int, default=int(os.getenv("MAX_SEVERITY_TO_PROCESS", DEFAULT_MAX_SEVERITY_TO_PROCESS)))
 
         # Локальная модель
@@ -126,9 +139,9 @@ class Config:
         return Config(
             db_path=a.db,
             debug_log_path=a.debug_log,
-            host=a.host,
-            port=a.port,
-            recv_buf=a.recv_buf,
+            host=a.bind_interface,
+            port=a.rsyslog_port,
+            recv_buf=a.rsyslog_recv_buf,
             max_severity=a.max_sev,
             model_path=a.model_path,
             n_ctx=a.n_ctx,
@@ -311,6 +324,19 @@ class Agent:
 
         providers = []
 
+        # 2. Google API (приоритет 2, опционально)
+        if cfg.enable_google:
+            try:
+                google = GoogleProvider(
+                    api_key=cfg.google_api_key,
+                    model_name=cfg.google_model
+                )
+                if google.is_available:
+                    providers.append(google)
+            except Exception as e:
+                logging.error(f"Не удалось инициализировать GoogleProvider: {e}")
+
+
         # 1. Локальная модель (приоритет 1)
         try:
             local = LocalProvider(
@@ -326,18 +352,7 @@ class Agent:
         except Exception as e:
             logging.error(f"Не удалось инициализировать LocalProvider: {e}")
 
-        # 2. Google API (приоритет 2, опционально)
-        if cfg.enable_google:
-            try:
-                google = GoogleProvider(
-                    api_key=cfg.google_api_key,
-                    model_name=cfg.google_model
-                )
-                if google.is_available:
-                    providers.append(google)
-            except Exception as e:
-                logging.error(f"Не удалось инициализировать GoogleProvider: {e}")
-
+        
         # Создаем оркестратор
         self.llm_orchestrator = LLMOrchestrator(providers)
 
@@ -400,7 +415,7 @@ class Agent:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((self.cfg.host, self.cfg.port))
             logging.info(f"Агент запущен на {self.cfg.host}:{self.cfg.port}, БД: {self.cfg.db_path}")
-            logging.info(f"Max severity: {self.cfg.max_severity} (0..{self.cfg.max_severity})")
+            logging.info(f"Уровень логов: {self.cfg.max_severity} (0..{self.cfg.max_severity})")
             logging.info(f"Интервал очистки: {self.cfg.clean_interval} сек ({self.cfg.clean_interval // (60 * 60 * 24)} дней)")
         except Exception as e:
             logging.critical(f"Не удалось запустить сервер: {e}")
@@ -495,7 +510,39 @@ class Agent:
         logging.info("Агент остановлен.")
 
 
+def check_dependencies():
+    """Проверка зависимостей Python"""
+    required_packages = {
+        "llama_cpp": "llama-cpp-python",
+        "json_repair": "json-repair",
+        "langid": "langid",
+        "langdetect": "langdetect",
+        "google.generativeai": "google-generativeai",
+        "flask": "flask",
+        "zoneinfo": "backports.zoneinfo",  # For Python < 3.9
+        "waitress": "waitress",
+        "dotenv": "python-dotenv",
+    }
+
+    missing_packages = []
+    for module_name, package_name in required_packages.items():
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing_packages.append(package_name)
+
+    if missing_packages:
+        logging.critical("Некоторые необходимые Python пакеты не установлены:")
+        for package_name in missing_packages:
+            logging.critical(f"  - {package_name}")
+        logging.critical("Пожалуйста, установите их с помощью: pip install {}".format(" ".join(missing_packages)))
+        sys.exit(1)
+
 def main() -> None:
+
+    # Check dependencies
+    check_dependencies()
+
     cfg = Config.from_env_and_args()
     setup_logging(cfg.debug_log_path)
 
@@ -506,7 +553,7 @@ def main() -> None:
     logging.info(f"Лог отладки: {cfg.debug_log_path}")
     logging.info(f"Max severity: {cfg.max_severity}")
     logging.info(f"Интервал очистки: {cfg.clean_interval} сек")
-    logging.info(f"Clean on start: {cfg.clean_on_start}")
+    logging.info(f"Принудительная очистка ВСЕХ инцидентов при старте: {cfg.clean_on_start}")
     logging.info("")
     logging.info("КОНФИГУРАЦИЯ LLM:")
     logging.info(f"  Локальная модель: {cfg.model_path}")
