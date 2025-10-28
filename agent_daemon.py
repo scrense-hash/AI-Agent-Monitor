@@ -74,7 +74,7 @@ DEFAULT_MAX_TOKENS = 256
 DEFAULT_TEMPERATURE = 0.0
 
 # Облачный API (OpenAI совместимый)
-DEFAULT_CLOUD_MODEL = "google/gemma-3-4b-it:free"
+DEFAULT_CLOUD_MODEL = "minimax/minimax-m2:free"
 DEFAULT_CLOUD_API_BASE_URL = "https://openrouter.ai/api/v1"
 
 # Настройки HTTP прокси для облачных API
