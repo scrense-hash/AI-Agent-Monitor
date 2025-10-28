@@ -29,7 +29,8 @@ import atexit
 import importlib.util
 import glob
 import re
-from dataclasses import dataclass
+import ipaddress
+from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from logging.handlers import RotatingFileHandler
 from typing import Optional, Dict, List, Any
@@ -54,6 +55,16 @@ DEFAULT_BIND_INTERFACE = "0.0.0.0"
 # Порт и буфер для rsyslog
 DEFAULT_RSYSLOG_PORT = 1514
 DEFAULT_RSYSLOG_RECV_BUF = 8192
+
+# Фильтр IP-адресов для приёма логов (строка с адресами/подсетями через запятую; пустая строка = без фильтра)
+DEFAULT_HOST_FILTER = ""
+
+
+def parse_host_filter(value: Optional[str]) -> List[str]:
+    if not value:
+        return []
+    parts = [part.strip() for part in value.split(",")]
+    return [part for part in parts if part]
 
 # Порт для встроенного веб-сервера мониторинга
 DEFAULT_WEB_PORT = 8000
@@ -102,6 +113,7 @@ class Config:
     port: int = DEFAULT_RSYSLOG_PORT
     recv_buf: int = DEFAULT_RSYSLOG_RECV_BUF
     max_severity: int = DEFAULT_MAX_SEVERITY_TO_PROCESS
+    host_filter: List[str] = field(default_factory=list)
 
     # Локальная модель
     model_path: str = DEFAULT_MODEL_PATH
@@ -137,6 +149,10 @@ class Config:
         p.add_argument("--web-port", type=int, default=int(os.getenv("WEB_PORT", DEFAULT_WEB_PORT)))
         p.add_argument("--rsyslog-recv-buf", type=int, default=int(os.getenv("RSYSLOG_RECV_BUF", DEFAULT_RSYSLOG_RECV_BUF)))
         p.add_argument("--max-sev", type=int, default=int(os.getenv("MAX_SEVERITY_TO_PROCESS", DEFAULT_MAX_SEVERITY_TO_PROCESS)))
+        host_filter_env = os.getenv("HOST_FILTER")
+        if host_filter_env is None or host_filter_env.strip() == "":
+            host_filter_env = os.getenv("DEFAULT_HOST_FILTER", DEFAULT_HOST_FILTER)
+        p.add_argument("--host-filter", default=host_filter_env, help="Список IP/подсетей для приёма логов (через запятую)")
 
         # Локальная модель
         p.add_argument("--model-path", default=os.getenv("MODEL_PATH", DEFAULT_MODEL_PATH))
@@ -187,6 +203,7 @@ class Config:
             port=a.rsyslog_port,
             recv_buf=a.rsyslog_recv_buf,
             max_severity=a.max_sev,
+            host_filter=parse_host_filter(a.host_filter),
             model_path=a.model_path,
             n_ctx=a.n_ctx,
             n_threads=a.n_threads,
@@ -364,6 +381,7 @@ class Agent:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self._stop = False
+        self.host_filters = self._compile_host_filters(cfg.host_filter)
 
         # Инициализация LLM-оркестратора
         logging.info("=" * 60)
@@ -453,6 +471,28 @@ class Agent:
         logging.debug("Нет подходящего плагина — пропуск.")
         return None
 
+    def _compile_host_filters(self, filters: List[str]) -> List[ipaddress._BaseNetwork]:
+        compiled: List[ipaddress._BaseNetwork] = []
+        for raw in filters:
+            try:
+                network = ipaddress.ip_network(raw, strict=False)
+                compiled.append(network)
+            except ValueError:
+                logging.warning(f"Некорректный фильтр IP '{raw}' — пропуск")
+        if filters and not compiled:
+            logging.warning("Фильтр IP-адресов задан, но не удалось разобрать ни одного значения")
+        return compiled
+
+    def _is_ip_allowed(self, ip: str) -> bool:
+        if not self.host_filters:
+            return True
+        try:
+            ip_obj = ipaddress.ip_address(ip)
+        except ValueError:
+            logging.warning(f"Получен некорректный IP-адрес '{ip}' — сообщение пропущено")
+            return False
+        return any(ip_obj in network for network in self.host_filters)
+
     def clean_db_on_start(self) -> None:
         try:
             if self.cfg.clean_on_start:
@@ -513,6 +553,9 @@ class Agent:
 
             try:
                 line = data.decode("utf-8", errors="ignore").strip()
+                if not self._is_ip_allowed(src_ip):
+                    logging.debug(f"Пропуск лога от {src_ip} — не входит в разрешённый фильтр IP")
+                    continue
                 logging.info(f"Получено сообщение от rsyslog: {src_ip}:{src_port} (длина: {len(line)})")
                 logging.debug(f"Содержимое: {line}")
 
@@ -610,6 +653,7 @@ def main() -> None:
     logging.info(f"База данных: {cfg.db_path}")
     logging.info(f"Лог отладки: {cfg.debug_log_path}")
     logging.info(f"Max severity: {cfg.max_severity}")
+    logging.info(f"Фильтр IP: {', '.join(cfg.host_filter) if cfg.host_filter else 'нет'}")
     logging.info(f"Интервал очистки: {cfg.clean_interval} сек")
     logging.info(f"Принудительная очистка ВСЕХ инцидентов при старте: {cfg.clean_on_start}")
     logging.info("")
