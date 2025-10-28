@@ -10,7 +10,7 @@ LLM-логика вынесена в модуль llm/.
 Структура:
 - llm/base_provider.py - базовый класс провайдера
 - llm/local_provider.py - локальная модель (llama.cpp)
-- llm/google_provider.py - Google Gemini API
+- llm/cloud_provider.py - облачный провайдер (OpenAI совместимый)
 - llm/orchestrator.py - оркестратор с fallback
 """
 
@@ -37,7 +37,7 @@ from typing import Optional, Dict, List, Any
 # Импорт LLM модулей
 import dotenv  # NOTE: There might be a Pylance issue with resolving the dotenv import even after installing the package.
 from llm.local_provider import LocalProvider
-from llm.google_provider import GoogleProvider
+from llm.cloud_provider import CloudProvider
 from llm.orchestrator import LLMOrchestrator
 
 
@@ -73,9 +73,14 @@ DEFAULT_N_GPU_LAYERS = -1
 DEFAULT_MAX_TOKENS = 256
 DEFAULT_TEMPERATURE = 0.0
 
-# Google API
-# Список моделей: curl "https://generativelanguage.googleapis.com/v1beta/models?key=${API_KEY}"
-DEFAULT_GOOGLE_MODEL = "gemini-2.5-flash"
+# Облачный API (OpenAI совместимый)
+DEFAULT_CLOUD_MODEL = "google/gemma-3-4b-it:free"
+DEFAULT_CLOUD_API_BASE_URL = "https://openrouter.ai/api/v1"
+
+# Настройки HTTP прокси для облачных API
+DEFAULT_PROXY_USE = False
+DEFAULT_PROXY_HOST = ""
+DEFAULT_PROXY_PORT = 0
 
 
 # -------- Конфигурация --------
@@ -97,10 +102,16 @@ class Config:
     max_tokens: int = DEFAULT_MAX_TOKENS
     temperature: float = DEFAULT_TEMPERATURE
 
-    # Google API
-    google_api_key: Optional[str] = None
-    google_model: str = DEFAULT_GOOGLE_MODEL
-    enable_google: bool = False
+    # Облачный API
+    cloud_api_key: Optional[str] = None
+    cloud_api_base_url: str = DEFAULT_CLOUD_API_BASE_URL
+    cloud_model: str = DEFAULT_CLOUD_MODEL
+    enable_cloud: bool = False
+    
+    # HTTP прокси для облачных API
+    proxy_host: str = DEFAULT_PROXY_HOST
+    proxy_port: int = DEFAULT_PROXY_PORT
+    proxy_use: bool = DEFAULT_PROXY_USE
 
     # Очистка БД
     clean_interval: int = DEFAULT_CLEAN_INTERVAL
@@ -126,10 +137,34 @@ class Config:
         p.add_argument("--max-tokens", type=int, default=int(os.getenv("MAX_TOKENS", DEFAULT_MAX_TOKENS)))
         p.add_argument("--temperature", type=float, default=float(os.getenv("TEMPERATURE", DEFAULT_TEMPERATURE)))
 
-        # Google API
-        p.add_argument("--google-api-key", default=os.getenv("GOOGLE_API_KEY"))
-        p.add_argument("--google-model", default=os.getenv("GOOGLE_MODEL", DEFAULT_GOOGLE_MODEL))
-        p.add_argument("--enable-google", action="store_true", default=os.getenv("ENABLE_GOOGLE", "").lower() in ("1", "true", "yes"))
+        # Облачный API
+        p.add_argument("--cloud-api-key", default=os.getenv("CLOUD_API_KEY", os.getenv("OPENAI_API_KEY")))
+        p.add_argument("--cloud-api-base-url", default=os.getenv("CLOUD_API_BASE_URL", DEFAULT_CLOUD_API_BASE_URL))
+        p.add_argument("--cloud-model", default=os.getenv("CLOUD_MODEL", DEFAULT_CLOUD_MODEL))
+        p.add_argument("--enable-cloud", action="store_true", default=os.getenv("ENABLE_CLOUD", "").lower() in ("1", "true", "yes"))
+        
+        # HTTP прокси
+        proxy_host_env = os.getenv("PROXY_HOST")
+        if proxy_host_env is None or proxy_host_env.strip() == "":
+            proxy_host_env = os.getenv("DEFAULT_PROXY_HOST", DEFAULT_PROXY_HOST)
+
+        proxy_port_env = os.getenv("PROXY_PORT")
+        if proxy_port_env is None or str(proxy_port_env).strip() == "":
+            proxy_port_env = os.getenv("DEFAULT_PROXY_PORT")
+        if proxy_port_env is None or str(proxy_port_env).strip() == "":
+            proxy_port_env = str(DEFAULT_PROXY_PORT)
+
+        env_proxy_use_raw = os.getenv("PROXY_USE")
+        if env_proxy_use_raw is None or str(env_proxy_use_raw).strip() == "":
+            env_proxy_use_raw = os.getenv("DEFAULT_PROXY_USE", str(DEFAULT_PROXY_USE))
+        env_proxy_use = str(env_proxy_use_raw).strip().lower()
+        proxy_use_default = env_proxy_use in ("1", "true", "yes", "on")
+
+        p.add_argument("--proxy-host", default=proxy_host_env)
+        p.add_argument("--proxy-port", type=int, default=int(proxy_port_env))
+        p.add_argument("--proxy-use", dest="proxy_use", action="store_true", help="Включить HTTP прокси для облачных API")
+        p.add_argument("--no-proxy-use", dest="proxy_use", action="store_false", help="Отключить HTTP прокси для облачных API")
+        p.set_defaults(proxy_use=proxy_use_default)
 
         # Очистка
         p.add_argument("--clean-interval", type=int, default=int(os.getenv("CLEAN_INTERVAL", DEFAULT_CLEAN_INTERVAL)))
@@ -149,9 +184,13 @@ class Config:
             n_gpu_layers=a.n_gpu_layers,
             max_tokens=a.max_tokens,
             temperature=a.temperature,
-            google_api_key=a.google_api_key,
-            google_model=a.google_model,
-            enable_google=a.enable_google,
+            cloud_api_key=a.cloud_api_key,
+            cloud_api_base_url=a.cloud_api_base_url,
+            cloud_model=a.cloud_model,
+            enable_cloud=a.enable_cloud,
+            proxy_host=a.proxy_host,
+            proxy_port=a.proxy_port,
+            proxy_use=a.proxy_use,
             clean_interval=a.clean_interval,
             clean_on_start=str(a.clean_on_start).strip().lower() in ("1", "true", "yes", "on"),
         )
@@ -324,17 +363,27 @@ class Agent:
 
         providers = []
 
-        # 2. Google API (приоритет 2, опционально)
-        if cfg.enable_google:
+        if not cfg.proxy_use and cfg.proxy_host and cfg.proxy_port:
+            proxy_url = f"http://{cfg.proxy_host}:{cfg.proxy_port}"
+            for env_var in ("HTTP_PROXY", "HTTPS_PROXY"):
+                if os.environ.get(env_var) == proxy_url:
+                    os.environ.pop(env_var, None)
+                    logging.info(f"Сброшена переменная окружения {env_var} (HTTP прокси отключен)")
+
+        # 2. Облачный провайдер (приоритет 2, опционально)
+        if cfg.enable_cloud:
             try:
-                google = GoogleProvider(
-                    api_key=cfg.google_api_key,
-                    model_name=cfg.google_model
+                cloud = CloudProvider(
+                    api_key=cfg.cloud_api_key,
+                    base_url=cfg.cloud_api_base_url,
+                    model_name=cfg.cloud_model,
+                    proxy_host=cfg.proxy_host if cfg.proxy_use else None,
+                    proxy_port=cfg.proxy_port if cfg.proxy_use else None
                 )
-                if google.is_available:
-                    providers.append(google)
+                if cloud.is_available:
+                    providers.append(cloud)
             except Exception as e:
-                logging.error(f"Не удалось инициализировать GoogleProvider: {e}")
+                logging.error(f"Не удалось инициализировать CloudProvider: {e}")
 
 
         # 1. Локальная модель (приоритет 1)
@@ -517,7 +566,7 @@ def check_dependencies():
         "json_repair": "json-repair",
         "langid": "langid",
         "langdetect": "langdetect",
-        "google.generativeai": "google-generativeai",
+        "requests": "requests",
         "flask": "flask",
         "zoneinfo": "backports.zoneinfo",  # For Python < 3.9
         "waitress": "waitress",
@@ -558,10 +607,17 @@ def main() -> None:
     logging.info("КОНФИГУРАЦИЯ LLM:")
     logging.info(f"  Локальная модель: {cfg.model_path}")
     logging.info(f"  Контекст: {cfg.n_ctx}, Потоки: {cfg.n_threads}, GPU слои: {cfg.n_gpu_layers}")
-    if cfg.enable_google:
-        logging.info(f"  Google API: ВКЛЮЧЕН (модель: {cfg.google_model})")
+    if cfg.enable_cloud:
+        logging.info(f"  Облачный API: ВКЛЮЧЕН (модель: {cfg.cloud_model})")
+        logging.info(f"  Базовый URL: {cfg.cloud_api_base_url}")
+        if cfg.proxy_use and cfg.proxy_host and cfg.proxy_port:
+            logging.info(f"  HTTP прокси: {cfg.proxy_host}:{cfg.proxy_port}")
+        elif not cfg.proxy_use:
+            logging.info("  HTTP прокси: отключен")
+        else:
+            logging.warning("  HTTP прокси: включен, но не указаны host/port")
     else:
-        logging.info(f"  Google API: ВЫКЛЮЧЕН")
+        logging.info("  Облачный API: ВЫКЛЮЧЕН")
     logging.info("=" * 60)
 
     # --- Запуск web_monitor ---

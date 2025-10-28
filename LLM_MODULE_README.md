@@ -17,7 +17,7 @@ llm/
 ├── __init__.py              # Экспорты модуля
 ├── base_provider.py         # Базовый абстрактный класс
 ├── local_provider.py        # Локальная модель (llama.cpp)
-├── google_provider.py       # Google Gemini API
+├── cloud_provider.py        # Облачный провайдер (OpenAI совместимый)
 └── orchestrator.py          # Оркестратор с fallback
 ```
 
@@ -72,22 +72,23 @@ if provider.is_available:
     print(summary)  # "Паника ядра: критический сбой системы"
 ```
 
-### 3. Google провайдер (`google_provider.py`)
+### 3. Облачный провайдер (`cloud_provider.py`)
 
 **Возможности:**
-- Интеграция с Google Gemini API
-- Поддержка различных моделей (gemini-pro, gemini-1.5-flash)
-- Кэширование результатов
-- Обработка rate limits и квот
-- Извлечение JSON из разных форматов ответов
+- Совместим с OpenAI API (chat/completions), по умолчанию использует OpenRouter
+- Настраиваемые `base_url`, модель и ключ через переменные окружения
+- Поддержка HTTP-прокси и инкрементального ожидания при `429`
+- Кэширование результатов и извлечение JSON даже из частичных ответов
+- Расширенные логи, включая полный ответ API при ошибке парсинга
 
 **Пример использования:**
 ```python
-from llm import GoogleProvider
+from llm import CloudProvider
 
-provider = GoogleProvider(
+provider = CloudProvider(
     api_key="your-api-key",
-    model_name="gemini-1.5-flash"
+    base_url="https://openrouter.ai/api/v1",
+    model_name="openai/gpt-4o-mini"
 )
 
 if provider.is_available:
@@ -96,9 +97,10 @@ if provider.is_available:
 ```
 
 **Переменные окружения:**
-- `GOOGLE_API_KEY` - API ключ
-- `ENABLE_GOOGLE=true` - включить провайдер
-- `GOOGLE_MODEL=gemini-1.5-flash` - выбор модели
+- `CLOUD_API_KEY` (или `OPENAI_API_KEY`) — API ключ
+- `CLOUD_API_BASE_URL=https://openrouter.ai/api/v1` — базовый URL
+- `CLOUD_MODEL=openai/gpt-4o-mini` — модель по умолчанию
+- `ENABLE_CLOUD=true` — включить провайдер
 
 ### 4. Оркестратор (`orchestrator.py`)
 
@@ -110,14 +112,14 @@ if provider.is_available:
 
 **Пример использования:**
 ```python
-from llm import LocalProvider, GoogleProvider, LLMOrchestrator
+from llm import LocalProvider, CloudProvider, LLMOrchestrator
 
 # Создаем провайдеры
 local = LocalProvider(model_path="...")
-google = GoogleProvider()
+cloud = CloudProvider()
 
 # Собираем оркестратор (порядок = приоритет)
-orchestrator = LLMOrchestrator([local, google])
+orchestrator = LLMOrchestrator([local, cloud])
 
 # Получаем summary (пробует провайдеры по очереди)
 summary = orchestrator.get_summary("disk I/O error")
@@ -131,7 +133,7 @@ orchestrator.log_stats()
 Обновленный `agent_daemon.py` теперь намного проще:
 
 ```python
-from llm import LocalProvider, GoogleProvider, LLMOrchestrator
+from llm import LocalProvider, CloudProvider, LLMOrchestrator
 
 class Agent:
     def __init__(self, cfg: Config):
@@ -148,14 +150,15 @@ class Agent:
         if local.is_available:
             providers.append(local)
 
-        # Google API (приоритет 2)
-        if cfg.enable_google:
-            google = GoogleProvider(
-                api_key=cfg.google_api_key,
-                model_name=cfg.google_model
+        # Облачный API (приоритет 2)
+        if cfg.enable_cloud:
+            cloud = CloudProvider(
+                api_key=cfg.cloud_api_key,
+                base_url=cfg.cloud_api_base_url,
+                model_name=cfg.cloud_model
             )
-            if google.is_available:
-                providers.append(google)
+            if cloud.is_available:
+                providers.append(cloud)
 
         # Создаем оркестратор
         self.llm_orchestrator = LLMOrchestrator(providers)
@@ -210,11 +213,11 @@ class OpenAIProvider(BaseLLMProvider):
 Затем в `agent_daemon.py`:
 
 ```python
-from llm import LocalProvider, GoogleProvider, OpenAIProvider, LLMOrchestrator
+from llm import LocalProvider, CloudProvider, OpenAIProvider, LLMOrchestrator
 
 providers = [
     LocalProvider(...),      # Приоритет 1
-    GoogleProvider(...),     # Приоритет 2
+    CloudProvider(...),      # Приоритет 2
     OpenAIProvider(...),     # Приоритет 3
 ]
 orchestrator = LLMOrchestrator(providers)
@@ -231,10 +234,11 @@ export N_CTX=4096
 export N_THREADS=8
 export N_GPU_LAYERS=35
 
-# Google API
-export ENABLE_GOOGLE=true
-export GOOGLE_API_KEY="your-key"
-export GOOGLE_MODEL="gemini-1.5-flash"
+# Облачный API
+export ENABLE_CLOUD=true
+export CLOUD_API_KEY="your-key"
+export CLOUD_API_BASE_URL="https://openrouter.ai/api/v1"
+export CLOUD_MODEL="openai/gpt-4o-mini"
 ```
 
 ### Через аргументы командной строки:
@@ -244,8 +248,8 @@ python agent_daemon.py \
   --model-path models/phi-3-mini.gguf \
   --n-ctx 4096 \
   --n-threads 8 \
-  --enable-google \
-  --google-model gemini-1.5-flash
+  --enable-cloud \
+  --cloud-model openai/gpt-4o-mini
 ```
 
 ## Логирование
@@ -255,7 +259,7 @@ python agent_daemon.py \
 ```
 [LocalLlama] Модель успешно загружена
 [LocalLlama] Summary language: RU (0.92, langid) | Ошибка чтения данных
-[GoogleGemini(gemini-1.5-flash)] Summary: Проблема с памятью системы
+[CloudLLM(openai/gpt-4o-mini)] Summary: Проблема с памятью системы
 [LLMOrchestrator] ✓ Summary от LocalLlama: Паника ядра...
 ```
 
@@ -275,7 +279,7 @@ stats = orchestrator.get_stats()
 #       "cache": {"hits": 142, "misses": 58, "size": 58}
 #     },
 #     {
-#       "name": "GoogleGemini",
+#       "name": "CloudLLM(openai/gpt-4o-mini)",
 #       "available": true,
 #       "cache": {"hits": 23, "misses": 5, "size": 5}
 #     }
@@ -326,9 +330,9 @@ pip install langid       # опционально, для детекции яз�
 pip install langdetect   # опционально, альтернатива langid
 ```
 
-### Google провайдер:
+### Облачный провайдер:
 ```bash
-pip install google-generativeai
+pip install requests
 ```
 
 ## FAQ
@@ -346,7 +350,7 @@ A: Измените порядок в списке providers при создан
 A: Да, каждый провайдер имеет свой собственный кэш результатов.
 
 **Q: Как отключить локальную модель?**
-A: Не добавляйте LocalProvider в список провайдеров или используйте только enable-google флаг.
+A: Не добавляйте LocalProvider в список провайдеров или используйте только флаг enable-cloud.
 
 ## Миграция со старой версии
 
@@ -354,7 +358,7 @@ A: Не добавляйте LocalProvider в список провайдеро�
 2. Скопируйте новые файлы модуля
 3. Замените старый `agent_daemon.py` на рефакторенную версию
 4. Установите дополнительные зависимости (если нужны)
-5. Настройте переменные окружения для Google API (если используете)
+5. Настройте переменные окружения для облачного API (если используете)
 
 Старая конфигурация останется совместимой!
 

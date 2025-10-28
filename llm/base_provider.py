@@ -46,7 +46,7 @@ class BaseLLMProvider(ABC):
         Возвращает имя провайдера для логирования.
 
         Returns:
-            str: Имя провайдера (например, "LocalLlama", "GoogleGemini")
+            str: Имя провайдера (например, "LocalLlama", "CloudLLM")
         """
         pass
 

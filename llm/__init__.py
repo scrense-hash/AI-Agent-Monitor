@@ -7,12 +7,12 @@ LLM модуль для AI Agent Monitor.
 
 from .base_provider import BaseLLMProvider
 from .local_provider import LocalProvider
-from .google_provider import GoogleProvider
+from .cloud_provider import CloudProvider
 from .orchestrator import LLMOrchestrator
 
 __all__ = [
     'BaseLLMProvider',
     'LocalProvider',
-    'GoogleProvider',
+    'CloudProvider',
     'LLMOrchestrator',
 ]
