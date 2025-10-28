@@ -68,7 +68,7 @@ DEFAULT_WEB_PORT = 8000
 # 5 - Notice (значимое событие, но не ошибка)
 # 6 - Informational (информационные сообщения)
 # 7 - Debug (отладочная информация)
-DEFAULT_MAX_SEVERITY_TO_PROCESS = 5
+DEFAULT_MAX_SEVERITY_TO_PROCESS = 4
 
 # Очистка БД
 DEFAULT_CLEAN_ON_START = True
