@@ -30,6 +30,7 @@ import importlib.util
 import glob
 import re
 import ipaddress
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from logging.handlers import RotatingFileHandler
@@ -40,6 +41,7 @@ import dotenv  # NOTE: There might be a Pylance issue with resolving the dotenv 
 from llm.local_provider import LocalProvider
 from llm.cloud_provider import CloudProvider
 from llm.orchestrator import LLMOrchestrator
+from integrations.zabbix_sender import ZabbixSenderError, send_event
 
 
 # -------- Константы --------
@@ -138,6 +140,13 @@ class Config:
     clean_interval: int = DEFAULT_CLEAN_INTERVAL
     clean_on_start: bool = DEFAULT_CLEAN_ON_START
 
+    # Интеграция с Zabbix
+    zabbix_sender_enabled: bool = False
+    zabbix_sender_path: Optional[str] = None
+    zabbix_server: Optional[str] = None
+    zabbix_host: Optional[str] = None
+    zabbix_key: Optional[str] = None
+
     @staticmethod
     def from_env_and_args() -> "Config":
         dotenv.load_dotenv()
@@ -195,6 +204,17 @@ class Config:
         p.add_argument("--clean-interval", type=int, default=int(os.getenv("CLEAN_INTERVAL", DEFAULT_CLEAN_INTERVAL)))
         p.add_argument("--clean-on-start", default=os.getenv("CLEAN_ON_START", str(DEFAULT_CLEAN_ON_START)))
 
+        # Zabbix sender
+        zabbix_enabled_env = os.getenv("ENABLE_ZABBIX_SENDER", "")
+        zabbix_enabled_default = str(zabbix_enabled_env).strip().lower() in ("1", "true", "yes", "on")
+        p.add_argument("--enable-zabbix-sender", dest="zabbix_sender_enabled", action="store_true", help="Включить отправку событий в Zabbix")
+        p.add_argument("--disable-zabbix-sender", dest="zabbix_sender_enabled", action="store_false", help="Отключить отправку событий в Zabbix")
+        p.set_defaults(zabbix_sender_enabled=zabbix_enabled_default)
+        p.add_argument("--zabbix-sender-path", default=os.getenv("ZABBIX_SENDER_PATH"))
+        p.add_argument("--zabbix-server", default=os.getenv("ZABBIX_SERVER"))
+        p.add_argument("--zabbix-host", default=os.getenv("ZABBIX_HOST"))
+        p.add_argument("--zabbix-key", default=os.getenv("ZABBIX_KEY"))
+
         a = p.parse_args()
         return Config(
             db_path=a.db,
@@ -219,6 +239,11 @@ class Config:
             proxy_use=a.proxy_use,
             clean_interval=a.clean_interval,
             clean_on_start=str(a.clean_on_start).strip().lower() in ("1", "true", "yes", "on"),
+            zabbix_sender_enabled=a.zabbix_sender_enabled,
+            zabbix_sender_path=a.zabbix_sender_path or None,
+            zabbix_server=a.zabbix_server or None,
+            zabbix_host=a.zabbix_host or None,
+            zabbix_key=a.zabbix_key or None,
         )
 
 
@@ -382,6 +407,29 @@ class Agent:
         self.cfg = cfg
         self._stop = False
         self.host_filters = self._compile_host_filters(cfg.host_filter)
+
+        # Проверка наличия zabbix_sender
+        self.zabbix_sender_path: Optional[str] = None
+        if self.cfg.zabbix_sender_enabled:
+            configured_path = self.cfg.zabbix_sender_path
+            resolved_path = None
+            if configured_path:
+                if os.path.isfile(configured_path) and os.access(configured_path, os.X_OK):
+                    resolved_path = configured_path
+                else:
+                    logging.warning(
+                        "Указанный путь до zabbix_sender недоступен: %s", configured_path
+                    )
+            if not resolved_path:
+                resolved_path = shutil.which("zabbix_sender")
+            if resolved_path:
+                self.zabbix_sender_path = resolved_path
+                self.cfg.zabbix_sender_path = resolved_path
+                logging.debug("Найден zabbix_sender: %s", resolved_path)
+            else:
+                logging.warning(
+                    "Zabbix Sender включен, но бинарник не найден. Интеграция будет пропущена."
+                )
 
         # Инициализация LLM-оркестратора
         logging.info("=" * 60)
@@ -594,6 +642,20 @@ class Agent:
 
                 logging.info("Инцидент успешно сохранён в БД")
 
+                if self.cfg.zabbix_sender_enabled and self.zabbix_sender_path:
+                    try:
+                        send_event(
+                            summary=summary,
+                            severity=parsed["severity"],
+                            host=host,
+                            count=parsed["count"],
+                            config=self.cfg,
+                        )
+                    except ZabbixSenderError as exc:
+                        logging.warning("Не удалось отправить событие в Zabbix: %s", exc)
+                    except Exception:
+                        logging.exception("Неизвестная ошибка отправки события в Zabbix")
+
             except Exception as e:
                 logging.exception(f"Ошибка обработки сообщения: {e}")
 
@@ -671,6 +733,14 @@ def main() -> None:
             logging.warning("  HTTP прокси: включен, но не указаны host/port")
     else:
         logging.info("  Облачный API: ВЫКЛЮЧЕН")
+    if cfg.zabbix_sender_enabled:
+        logging.info("Интеграция Zabbix: ВКЛЮЧЕНА")
+        logging.info(f"  Сервер: {cfg.zabbix_server or 'не указан'}")
+        logging.info(f"  Хост: {cfg.zabbix_host or 'используется host события'}")
+        logging.info(f"  Ключ: {cfg.zabbix_key or 'не указан'}")
+        logging.info(f"  Путь: {cfg.zabbix_sender_path or 'используется поиск в PATH'}")
+    else:
+        logging.info("Интеграция Zabbix: отключена")
     logging.info("=" * 60)
 
     # --- Запуск web_monitor ---
