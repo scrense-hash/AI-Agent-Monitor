@@ -1,0 +1,9 @@
+Flask
+json-repair
+langdetect
+langid
+llama-cpp-python
+pytest
+python-dotenv
+requests
+waitress
